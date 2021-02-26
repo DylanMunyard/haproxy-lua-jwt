@@ -27,7 +27,8 @@ if not config then
       publicKey = nil,
       issuer = nil,
       audience = nil,
-      hmacSecret = nil
+      hmacSecret = nil,
+      authHeader = "Authorization"
   }
 end
 
@@ -142,10 +143,10 @@ function jwtverify(txn)
   local hmacSecret = config.hmacSecret
 
   -- 1. Decode and parse the JWT
-  local token = decodeJwt(txn.sf:req_hdr("Authorization"))
+  local token = decodeJwt(txn.sf:req_hdr(config.authHeader))
 
   if token == nil then
-    log("Token could not be decoded.")
+    log("Token could not be decoded from " .. config.authHeaderName .. " header.")
     goto out
   end
 
@@ -219,6 +220,12 @@ config.publicKey = pem
 
 -- when using an HS256 signature
 config.hmacSecret = os.getenv("OAUTH_HMAC_SECRET")
+
+-- optionally override bearer token header name
+local authHeaderName = os.getenv("OAUTH_AUTH_HEADER_NAME")
+if (authHeaderName and not authHeaderName == '') then
+    config.authHeader = authHeaderName
+end
 
 log("PublicKeyPath: " .. publicKeyPath)
 log("Issuer: " .. (config.issuer or "<none>"))
