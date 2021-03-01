@@ -104,8 +104,8 @@ install_deb_lua() {
 download_luajwt() {
     printf "\r[+] Downloading haproxy-lua-jwt\n"
     cd $SOURCE_DIR
-    curl -sLO https://github.com/haproxytech/haproxy-lua-jwt/archive/master.zip
-    unzip -qo master.zip && rm master.zip
+    curl -sLO https://github.com/DylanMunyard/haproxy-lua-jwt/releases/download/0.1/haproxy-lua-jwt-master.zip
+    unzip -qo haproxy-lua-jwt-master.zip && rm haproxy-lua-jwt-master.zip
 }
 
 download_luajwt_deps() {

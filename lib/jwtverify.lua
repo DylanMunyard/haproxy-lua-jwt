@@ -102,12 +102,78 @@ local function algorithmIsValid(token)
   if token.headerdecoded.alg == nil then
       log("No 'alg' provided in JWT header.")
       return false
-  elseif token.headerdecoded.alg ~= 'HS256' and token.headerdecoded.alg ~= 'RS256' then
-      log("HS256 and RS256 supported. Incorrect alg in JWT: " .. token.headerdecoded.alg)
+  elseif token.headerdecoded.alg ~= 'HS256' and token.headerdecoded.alg ~= 'RS256' and token.headerdecoded.alg ~= 'ES256' then
+      log("HS256, RS256 and ES256 supported. Incorrect alg in JWT: " .. token.headerdecoded.alg)
       return false
   end
 
   return true
+end
+
+local function countPadding(buf, start, stop)
+	local padding = -1 -- adds a byte before the value with a value of 0, to indicate the values are positive, https://crypto.stackexchange.com/questions/1795/how-can-i-convert-a-der-ecdsa-signature-to-asn-1
+	while (start + padding <= stop and buf:byte(start + padding, 1) == 0)
+	do
+		padding = padding + 1
+	end
+
+	return padding
+end
+
+local function joseToDer(signature)
+    local CLASS_UNIVERSAL = 0
+    local PRIMITIVE_BIT = 0x20
+    local TAG_SEQ = 0x10
+    local TAG_INT = 0x02
+    local ENCODED_TAG_SEQ = (TAG_SEQ | PRIMITIVE_BIT) | (CLASS_UNIVERSAL << 6)
+    local ENCODED_TAG_INT = TAG_INT | (CLASS_UNIVERSAL << 6)
+	local paramBytes = 32
+	local signatureBytes = string.len(signature)
+	if signatureBytes ~= paramBytes * 2 then
+		log("ECDSA signatures must be " .. paramBytes * 2 .. " bytes, saw " .. signatureBytes)
+	end
+	
+	local rPadding = countPadding(signature, 1, paramBytes)
+	local sPadding = countPadding(sig, paramBytes, signatureBytes)
+	local rLength = paramBytes - rPadding
+	local sLength = paramBytes - sPadding
+
+	local rsBytes = 1 + 1 + rLength + 1 + 1 + sLength;
+
+	log("rLength=" .. rLength .. " sLength=" .. sLength .. " rsBytes=" .. rsBytes .. " rPadding=" .. rPadding .. " sPadding=" .. sPadding)
+
+	local dst = {}
+	dst[#dst+1] = string.char(ENCODED_TAG_SEQ)
+	dst[#dst+1] = string.char(rsBytes)
+	dst[#dst+1] = string.char(ENCODED_TAG_INT);
+	dst[#dst+1] = string.char(rLength)
+	if rPadding < 0 then
+		dst[#dst+1] = string.char(0)
+		dst[#dst+1] = sig:sub(1, paramBytes)
+	else
+		dst[#dst+1] = signature:sub(rPadding + 1, paramBytes)
+	end
+
+	dst[#dst+1] = string.char(ENCODED_TAG_INT)
+	dst[#dst+1] = string.char(sLength)
+	if sPadding < 0 then
+		dst[#dst+1] = string.char(0)
+		dst[#dst+1] = signature:sub(paramBytes + 1)
+	else
+		dst[#dst+1] = signature:sub(paramBytes + 1 + sPadding)
+	end
+
+	return table.concat(dst)
+end
+
+local function es256SignatureIsValid(token, publicKey)
+  local digest = openssl.digest.new('SHA256')
+  digest:update(token.header .. '.' .. token.payload)
+  local vkey = openssl.pkey.new(publicKey)
+  -- convert the signature from JOSE to DES encoded
+  local desSignature = joseToDer(token.signaturedecoded)
+  local isVerified = vkey:verify(desSignature, digest)
+  return isVerified
 end
 
 local function rs256SignatureIsValid(token, publicKey)
@@ -137,7 +203,6 @@ local function audienceIsValid(token, expectedAudience)
 end
 
 function jwtverify(txn)
-  local pem = config.publicKey
   local issuer = config.issuer
   local audience = config.audience
   local hmacSecret = config.hmacSecret
@@ -156,6 +221,11 @@ function jwtverify(txn)
       goto out
   end
 
+  local pem = config.publicKey -- by default a single certificate is provided
+  if type(config.publicKey) == 'table' then
+    pem = config.publicKey[token.headerdecoded.kid] -- but can support a map of keys
+  end
+  
   -- 3. Verify the signature with the certificate
   if token.headerdecoded.alg == 'RS256' then
     if rs256SignatureIsValid(token, pem) == false then
@@ -164,6 +234,11 @@ function jwtverify(txn)
     end
   elseif token.headerdecoded.alg == 'HS256' then
     if hs256SignatureIsValid(token, hmacSecret) == false then
+      log("Signature not valid.")
+      goto out
+    end
+  elseif token.headerdecoded.alg == 'ES256' then
+    if es256SignatureIsValid(token, pem) == false then
       log("Signature not valid.")
       goto out
     end
@@ -216,7 +291,11 @@ config.audience = os.getenv("OAUTH_AUDIENCE")
 -- when using an RS256 signature
 local publicKeyPath = os.getenv("OAUTH_PUBKEY_PATH") 
 local pem = readAll(publicKeyPath)
-config.publicKey = pem
+if publicKeyPath:match(".json$") then
+    config.publicKey = json.decode(pem)
+else
+    config.publicKey = pem
+end
 
 -- when using an HS256 signature
 config.hmacSecret = os.getenv("OAUTH_HMAC_SECRET")
