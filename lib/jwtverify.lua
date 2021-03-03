@@ -32,7 +32,8 @@ if not config then
   }
 end
 
-local json   = require 'json'
+local asn_sequence = require 'asn_sequence'
+local json   = require 'cjson'
 local base64 = require 'base64'
 local openssl = {
   pkey = require 'openssl.pkey',
@@ -70,27 +71,45 @@ end
 
 local function decodeJwt(authorizationHeader)
   local headerFields = core.tokenize(authorizationHeader, " .")
-
-  if #headerFields ~= 4 then
+  local headerFieldsStart = 1
+  
+  if config.authHeader == "Authorization" then
+    headerFieldsStart = 2
+    
+    if #headerFields ~= 4 then
       log("Improperly formated Authorization header. Should be 'Bearer' followed by 3 token sections.")
       return nil
-  end
-
-  if headerFields[1] ~= 'Bearer' then
-      log("Improperly formated Authorization header. Missing 'Bearer' property.")
+    end
+    
+    if headerFields[1] ~= 'Bearer' then
+      log("Improperly formatted Authorization header. Missing 'Bearer' property.")
       return nil
+    end
+  elseif #headerFields ~= 3 then
+    log("The base64 encoded JWT token should contain 3 sections separated with a period (.).")
+    return nil
   end
 
   local token = {}
-  token.header = headerFields[2]
-  token.headerdecoded = json.decode(base64.decode(token.header))
-
-  token.payload = headerFields[3]
-  token.payloaddecoded = json.decode(base64.decode(token.payload))
-
-  token.signature = headerFields[4]
-  token.signaturedecoded = base64.decode(token.signature)
-
+  token.header = headerFields[headerFieldsStart]
+  token.payload = headerFields[headerFieldsStart + 1]
+  token.signature = headerFields[headerFieldsStart + 2]
+  
+  -- Decode JSON
+  local ok, header, claims, signature = pcall(function()
+    return json.decode(base64.decode(token.header)),
+           json.decode(base64.decode(token.payload)),
+           base64.decode(token.signature)
+  end)
+  if not ok then
+    log("invalid JSON")
+    return nil
+  end
+  
+  token.headerdecoded = header
+  token.payloaddecoded = claims
+  token.signaturedecoded = signature
+  
   log('Authorization header: ' .. authorizationHeader)
   log('Decoded JWT header: ' .. dump(token.headerdecoded))
   log('Decoded JWT payload: ' .. dump(token.payloaddecoded))
@@ -110,70 +129,21 @@ local function algorithmIsValid(token)
   return true
 end
 
-local function countPadding(buf, start, stop)
-	local padding = -1 -- adds a byte before the value with a value of 0, to indicate the values are positive, https://crypto.stackexchange.com/questions/1795/how-can-i-convert-a-der-ecdsa-signature-to-asn-1
-	while (start + padding <= stop and buf:byte(start + padding, 1) == 0)
-	do
-		padding = padding + 1
-	end
-
-	return padding
-end
-
-local function joseToDer(signature)
-    local CLASS_UNIVERSAL = 0
-    local PRIMITIVE_BIT = 0x20
-    local TAG_SEQ = 0x10
-    local TAG_INT = 0x02
-    local ENCODED_TAG_SEQ = (TAG_SEQ | PRIMITIVE_BIT) | (CLASS_UNIVERSAL << 6)
-    local ENCODED_TAG_INT = TAG_INT | (CLASS_UNIVERSAL << 6)
-	local paramBytes = 32
-	local signatureBytes = string.len(signature)
-	if signatureBytes ~= paramBytes * 2 then
-		log("ECDSA signatures must be " .. paramBytes * 2 .. " bytes, saw " .. signatureBytes)
-	end
-	
-	local rPadding = countPadding(signature, 1, paramBytes)
-	local sPadding = countPadding(sig, paramBytes, signatureBytes)
-	local rLength = paramBytes - rPadding
-	local sLength = paramBytes - sPadding
-
-	local rsBytes = 1 + 1 + rLength + 1 + 1 + sLength;
-
-	log("rLength=" .. rLength .. " sLength=" .. sLength .. " rsBytes=" .. rsBytes .. " rPadding=" .. rPadding .. " sPadding=" .. sPadding)
-
-	local dst = {}
-	dst[#dst+1] = string.char(ENCODED_TAG_SEQ)
-	dst[#dst+1] = string.char(rsBytes)
-	dst[#dst+1] = string.char(ENCODED_TAG_INT);
-	dst[#dst+1] = string.char(rLength)
-	if rPadding < 0 then
-		dst[#dst+1] = string.char(0)
-		dst[#dst+1] = sig:sub(1, paramBytes)
-	else
-		dst[#dst+1] = signature:sub(rPadding + 1, paramBytes)
-	end
-
-	dst[#dst+1] = string.char(ENCODED_TAG_INT)
-	dst[#dst+1] = string.char(sLength)
-	if sPadding < 0 then
-		dst[#dst+1] = string.char(0)
-		dst[#dst+1] = signature:sub(paramBytes + 1)
-	else
-		dst[#dst+1] = signature:sub(paramBytes + 1 + sPadding)
-	end
-
-	return table.concat(dst)
-end
-
+--- Verify a JWT signature
+--- Snippet fully attributed to Kong jwt_parser: https://github.com/Kong/kong/blob/master/kong/plugins/jwt/jwt_parser.lua
 local function es256SignatureIsValid(token, publicKey)
-  local digest = openssl.digest.new('SHA256')
+  local pkey, _ = openssl.pkey.new(publicKey)
+  if #token.signaturedecoded ~= 64 then
+      log("Signature must be 64 bytes.")
+      return false
+  end
+  local asn = {}
+  asn[1] = asn_sequence.resign_integer(string.sub(token.signaturedecoded, 1, 32))
+  asn[2] = asn_sequence.resign_integer(string.sub(token.signaturedecoded, 33, 64))
+  local signatureAsn = asn_sequence.create_simple_sequence(asn)
+  local digest = openssl.digest.new("sha256")
   digest:update(token.header .. '.' .. token.payload)
-  local vkey = openssl.pkey.new(publicKey)
-  -- convert the signature from JOSE to DES encoded
-  local desSignature = joseToDer(token.signaturedecoded)
-  local isVerified = vkey:verify(desSignature, digest)
-  return isVerified
+  return pkey:verify(signatureAsn, digest)
 end
 
 local function rs256SignatureIsValid(token, publicKey)
@@ -206,24 +176,24 @@ function jwtverify(txn)
   local issuer = config.issuer
   local audience = config.audience
   local hmacSecret = config.hmacSecret
+  local pem = config.publicKey -- by default a single certificate is provided
 
   -- 1. Decode and parse the JWT
   local token = decodeJwt(txn.sf:req_hdr(config.authHeader))
 
   if token == nil then
-    log("Token could not be decoded from " .. config.authHeaderName .. " header.")
+    log("Token could not be decoded from " .. config.authHeader .. " header.")
     goto out
+  end
+
+  if type(config.publicKey) == 'table' then
+    pem = config.publicKey[token.headerdecoded.kid] -- pem file can be a map of key Id to PEM
   end
 
   -- 2. Verify the signature algorithm is supported (HS256, RS256)
   if algorithmIsValid(token) == false then
       log("Algorithm not valid.")
       goto out
-  end
-
-  local pem = config.publicKey -- by default a single certificate is provided
-  if type(config.publicKey) == 'table' then
-    pem = config.publicKey[token.headerdecoded.kid] -- but can support a map of keys
   end
   
   -- 3. Verify the signature with the certificate
@@ -302,13 +272,14 @@ config.hmacSecret = os.getenv("OAUTH_HMAC_SECRET")
 
 -- optionally override bearer token header name
 local authHeaderName = os.getenv("OAUTH_AUTH_HEADER_NAME")
-if (authHeaderName and not authHeaderName == '') then
+if (authHeaderName ~= nil and authHeaderName ~= '') then
     config.authHeader = authHeaderName
 end
 
 log("PublicKeyPath: " .. publicKeyPath)
 log("Issuer: " .. (config.issuer or "<none>"))
 log("Audience: " .. (config.audience or "<none>"))
+log("JWT Header: " .. (config.authHeader or "<none>"))
 end)
 
 -- Called on a request.

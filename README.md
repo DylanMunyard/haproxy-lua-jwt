@@ -2,6 +2,10 @@
 
 This is a Lua library for HAProxy that will verify JWT tokens.
 
+## Packaging
+For the GitHub release, archive the haproxy-lua-jwt folder (from it's parent location):
+`tar -cf haproxy-lua-jwt.tar --exclude '.git' --exclude '.idea' haproxy-lua-jwt`
+
 ## Install
 
 The `jwtverify.lua` file has these dependencies:
