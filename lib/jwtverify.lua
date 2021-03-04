@@ -28,7 +28,8 @@ if not config then
       issuer = nil,
       audience = nil,
       hmacSecret = nil,
-      authHeader = "Authorization"
+      authHeader = "Authorization",
+      emailsAllowed = {}
   }
 end
 
@@ -238,8 +239,14 @@ function jwtverify(txn)
   else
     txn.set_var(txn, "txn.oauth_scopes", "")
   end
+  
+  -- 8. Verify email is on whitelist
+  if config.emailsAllowed[token.payloaddecoded.email] == nil then
+    log("Email <"..token.payloaddecoded.email.."> is blocked.")
+    goto out
+  end
 
-  -- 8. Set authorized variable
+  -- 9. Set authorized variable
   log("req.authorized = true")
   txn.set_var(txn, "txn.authorized", true)
 
@@ -276,10 +283,17 @@ if (authHeaderName ~= nil and authHeaderName ~= '') then
     config.authHeader = authHeaderName
 end
 
+-- Google auth lets all Google accounts through, so we need to filter them out.
+local emailsAllowed = os.getenv("OAUTH_ALLOW_EMAILS")
+if (emailsAllowed ~= nil and emailsAllowed ~= '') then
+    config.emailsAllowed = core.tokenize(emailsAllowed, ",")
+end
+
 log("PublicKeyPath: " .. publicKeyPath)
 log("Issuer: " .. (config.issuer or "<none>"))
 log("Audience: " .. (config.audience or "<none>"))
 log("JWT Header: " .. (config.authHeader or "<none>"))
+log("#Emails allowed: " .. #config.emailsAllowed)
 end)
 
 -- Called on a request.
