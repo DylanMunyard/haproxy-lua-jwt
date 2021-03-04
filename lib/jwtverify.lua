@@ -177,6 +177,7 @@ function jwtverify(txn)
   local issuer = config.issuer
   local audience = config.audience
   local hmacSecret = config.hmacSecret
+  local emailAllowed = false
   local pem = config.publicKey -- by default a single certificate is provided
 
   -- 1. Decode and parse the JWT
@@ -241,9 +242,16 @@ function jwtverify(txn)
   end
   
   -- 8. Verify email is on whitelist
-  if config.emailsAllowed[token.payloaddecoded.email] == nil then
-    log("Email <"..token.payloaddecoded.email.."> is blocked.")
-    goto out
+  for _, email in ipairs(config.emailsAllowed) do
+    if email == token.payloaddecoded.email then 
+    	emailAllowed = true
+    	break
+    end
+  end
+  
+  if not emailAllowed then
+  	log("Email <"..token.payloaddecoded.email.."> is blocked.")
+  	goto out
   end
 
   -- 9. Set authorized variable
